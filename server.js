@@ -64,7 +64,15 @@ async function generateFromAI(userPrompt) {
   if (data.candidates?.[0]?.content?.parts) {
     for (const part of data.candidates[0].content.parts) if (part.text) raw += part.text;
   }
-  return JSON.parse(raw);
+  const finishReason = data.candidates?.[0]?.finishReason;
+  try {
+    return JSON.parse(raw);
+  } catch (e) {
+    if (finishReason === "MAX_TOKENS") {
+      throw new Error("La reponse IA etait trop longue (coupee). Demande plus simple ou augmente maxOutputTokens.");
+    }
+    throw new Error("JSON invalide de l'IA: " + String(e));
+  }
 }
 
 // PORTE 1 : le site DEPOSE une demande
