@@ -53,9 +53,11 @@ async function generateFromAI(userPrompt) {
 function parseCompact(raw) {
   const result = { category: "Build", summary: "", buildName: "Build", steps: [], actions: [] };
   const lines = raw.split("\n");
-  for (const line of lines) {
-    const t = line.trim();
+  for (const rawLine of lines) {
+    let t = rawLine.trim();
     if (t === "") continue;
+    // Nettoyer les prefixes parasites que l'IA ajoute parfois
+    t = t.replace(/^Part\s*:\s*/i, "").replace(/^Script\s*:\s*/i, "").replace(/^[-*]\s*/, "");
     if (t.startsWith("CAT:")) {
       result.category = t.slice(4).trim();
     } else if (t.startsWith("SUM:")) {
