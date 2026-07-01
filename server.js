@@ -47,7 +47,7 @@ async function generateFromAI(userPrompt) {
       if (part.text) raw += part.text;
     }
   }
-  return parseCompact(raw);
+  return { result: parseCompact(raw), raw: raw };
 }
 
 function parseCompact(raw) {
@@ -110,9 +110,9 @@ app.post("/submit", async (req, res) => {
     if (!GEMINI_API_KEY) {
       return res.status(500).json({ error: "Cle non configuree" });
     }
-    const result = await generateFromAI(userPrompt);
+    const { result, raw } = await generateFromAI(userPrompt);
     mailbox = result;
-    res.json({ status: "ok", preview: result.summary, parts: result.actions.length });
+    res.json({ status: "ok", preview: result.summary, parts: result.actions.length, raw_ai: raw });
   } catch (err) {
     res.status(500).json({ error: "Erreur generation", details: String(err) });
   }
