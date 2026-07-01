@@ -6,35 +6,119 @@ app.use(express.json());
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const MODEL = "gemini-2.5-flash";
 
-// LA BOITE AUX LETTRES (un seul casier partage pour l'instant)
-let mailbox = null; // contiendra la derniere generation en attente
+let mailbox = null;
 
-app.get("/", (req, res) => {
-  res.send("FORGE server is running!");
-});
+app.get("/", (req, res) => res.send("FORGE server is running!"));
 
-// Fonction interne : appelle l'IA et renvoie les actions
+// Appel IA en FORMAT COMPACT
 async function generateFromAI(userPrompt) {
   const sys =
-    "Tu es FORGE, un assistant expert du developpement Roblox (Luau) qui CONSTRUIT dans le workspace. " +
-    "Analyse la demande et choisis une categorie courte (Build, Script, UI, Systeme, Debug). " +
-    "Donne un resume bref (summary) et un plan (steps) de 2 a 5 etapes, dans la langue de l'utilisateur. " +
-    "Fournis des ACTIONS concretes avec ces outils: " +
-    "create_part (name, shape [Block|Ball|Cylinder|Wedge], px,py,pz, sx,sy,sz, r,g,b (0-255), material, anchored) ; " +
-    "create_script (name, scriptType [Script|LocalScript|ModuleScript], parent [ServerScriptService|ReplicatedStorage|StarterGui|StarterPlayerScripts|Workspace], source). " +
-    "REGLE ABSOLUE: si la demande implique de creer quelque chose, 'actions' ne doit JAMAIS etre vide. " +
-    "Pose les objets au sol (py = sy/2), empile vers le haut. Un arbre = tronc Cylinder marron + feuillage vert. Max 15 parts.";
+    "Tu es FORGE, expert du developpement Roblox (Luau) qui CONSTRUIT dans le workspace.\n" +
+    "Reponds EXACTEMENT dans ce format texte, rien d'autre :\n" +
+    "CAT: <categorie courte>\n" +
+    "SUM: <resume en une phrase, langue de l'utilisateur>\n" +
+    "NAME: <nom court du build>\n" +
+    "STEP: <etape 1>\n" +
+    "STEP: <etape 2>\n" +
+    "(2 a 5 lignes STEP)\n" +
+    "Puis les actions, une par ligne :\n" +
+    "Pour une part : P,<nom>,<shape Block|Ball|Cylinder|Wedge>,<px>,<py>,<pz>,<sx>,<sy>,<sz>,<r>,<g>,<b>,<material>\n" +
+    "Pour un script : S,<nom>,<Script|LocalScript|ModuleScript>,<parent>,<code luau sur une seule ligne avec \\n pour les retours>\n" +
+    "Regles: pose au sol (py = sy/2), empile vers le haut. r,g,b entre 0 et 255. " +
+    "material: Plastic,Wood,Grass,Slate,Concrete,Metal,Neon,Sand,Brick,Marble,Ice. " +
+    "parent: ServerScriptService,ReplicatedStorage,StarterGui,StarterPlayerScripts,Workspace. " +
+    "Un arbre = tronc Cylinder marron + feuillage vert (Ball/Block). Sois concis. Max 20 parts.\n" +
+    "N'ecris AUCUN texte hors de ce format. Pas de Markdown, pas de ```.";
 
-  const schema = {
-    type: "OBJECT",
-    properties: {
-      category: { type: "STRING" }, summary: { type: "STRING" }, buildName: { type: "STRING" },
-      steps: { type: "ARRAY", items: { type: "STRING" } },
-      actions: {
-        type: "ARRAY",
-        items: {
-          type: "OBJECT",
-          properties: {
+  const url = "https://generativelanguage.googleapis.com/v1beta/models/" + MODEL + ":generateContent";
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "x-goog-api-key": GEMINI_API_KEY },
+    body: JSON.stringify({
+      system_instruction: { parts: [{ text: sys }] },
+      contents: [{ role: "user", parts: [{ text: userPrompt }] }],
+      generationConfig: { maxOutputTokens: 8192, temperature: 0.4 },
+    }),
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error(JSON.stringify(data));
+
+  let raw = "";
+  if (data.candidates?.[0]?.content?.parts) {
+    for (const part of data.candidates[0].content.parts) if (part.text) raw += part.text;
+  }
+  return parseCompact(raw);
+}
+
+// Transforme le format compact en objet propre (ANTI-CRASH)
+function parseCompact(raw) {
+  const result = { category: "Build", summary: "", buildName: "Build", steps: [], actions: [] };
+  const lines = raw.split("\n");
+
+  for (const line of lines) {
+    const t = line.trim();
+    if (t === "") continue;
+
+    if (t.startsWith("CAT:")) result.category = t.slice(4).trim();
+    else if (t.startsWith("SUM:")) result.summary = t.slice(4).trim();
+    else if (t.startsWith("NAME:")) result.buildName = t.slice(5).trim();
+    else if (t.startsWith("STEP:")) result.steps.push(t.slice(5).trim());
+    else if (t.startsWith("P,")) {
+      const p = t.split(",");
+      // P,name,shape,px,py,pz,sx,sy,sz,r,g,b,material = 13 champs
+      if (p.length >= 13) {
+        result.actions.push({
+          tool: "create_part",
+          name: p[1], shape: p[2],
+          px: Number(p[3]) || 0, py: Number(p[4]) || 0, pz: Number(p[5]) || 0,
+          sx: Number(p[6]) || 1, sy: Number(p[7]) || 1, sz: Number(p[8]) || 1,
+          r: Number(p[9]) || 150, g: Number(p[10]) || 150, b: Number(p[11]) || 150,
+          material: p[12] ? p[12].trim() : "Plastic",
+          anchored: true,
+        });
+      }
+      // si la ligne est coupee (moins de 13 champs), on l'IGNORE proprement -> pas de crash
+    }
+    else if (t.startsWith("S,")) {
+      // S,name,type,parent,code...  (le code peut contenir des virgules -> on recolle)
+      const p = t.split(",");
+      if (p.length >= 5) {
+        const code = p.slice(4).join(",").replace(/\\n/g, "\n");
+        result.actions.push({
+          tool: "create_script",
+          name: p[1], scriptType: p[2], parent: p[3], source: code,
+        });
+      }
+    }
+  }
+  return result;
+}
+
+app.post("/submit", async (req, res) => {
+  try {
+    const userPrompt = req.body.prompt;
+    if (!userPrompt) return res.status(400).json({ error: "Aucun prompt" });
+    if (!GEMINI_API_KEY) return res.status(500).json({ error: "Cle non configuree" });
+    const result = await generateFromAI(userPrompt);
+    mailbox = result;
+    res.json({ status: "ok", preview: result.summary, parts: result.actions.length });
+  } catch (err) {
+    res.status(500).json({ error: "Erreur generation", details: String(err) });
+  }
+});
+
+app.get("/poll", (req, res) => {
+  if (mailbox) {
+    const toSend = mailbox;
+    mailbox = null;
+    res.json({ hasWork: true, job: toSend });
+  } else {
+    res.json({ hasWork: false });
+  }
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log("FORGE server demarre sur le port " + PORT));          properties: {
             tool: { type: "STRING" }, name: { type: "STRING" }, shape: { type: "STRING" },
             px: { type: "NUMBER" }, py: { type: "NUMBER" }, pz: { type: "NUMBER" },
             sx: { type: "NUMBER" }, sy: { type: "NUMBER" }, sz: { type: "NUMBER" },
