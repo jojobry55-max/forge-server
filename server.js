@@ -1,4 +1,25 @@
 import express from "express";
+import pg from "pg";
+
+const pool = new pg.Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false },
+});
+
+// Cree la table des utilisateurs si elle n'existe pas encore
+async function initDatabase() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS users (
+      id SERIAL PRIMARY KEY,
+      roblox_id TEXT UNIQUE,
+      username TEXT,
+      credits INTEGER DEFAULT 0,
+      created_at TIMESTAMP DEFAULT NOW()
+    )
+  `);
+  console.log("Base de donnees prete (table users).");
+}
+initDatabase().catch((e) => console.error("Erreur init DB:", e));
 
 const app = express();
 app.use(express.json());
@@ -127,6 +148,20 @@ app.get("/poll", (req, res) => {
     res.json({ hasWork: true, job: toSend });
   } else {
     res.json({ hasWork: false });
+  }
+});
+
+// Route de test : cree un utilisateur bidon et compte les utilisateurs
+app.get("/db-test", async (req, res) => {
+  try {
+    await pool.query(
+      "INSERT INTO users (roblox_id, username, credits) VALUES ($1, $2, $3) ON CONFLICT (roblox_id) DO NOTHING",
+      ["test_" + Date.now(), "JoueurTest", 100]
+    );
+    const result = await pool.query("SELECT COUNT(*) FROM users");
+    res.json({ status: "ok", nombre_utilisateurs: result.rows[0].count });
+  } catch (err) {
+    res.status(500).json({ error: "Erreur base de donnees", details: String(err) });
   }
 });
 
