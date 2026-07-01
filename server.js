@@ -23,7 +23,8 @@ async function initDatabase() {
       used BOOLEAN DEFAULT FALSE,
       roblox_id TEXT,
       username TEXT,
-      created_at TIMESTAMP DEFAULT NOW()
+      created_at TIMESTAMP DEFAULT NOW(),
+      expires_at TIMESTAMP
     )
   `);
   console.log("Base de donnees prete (users + link_codes).");
@@ -42,12 +43,24 @@ app.get("/", (req, res) => res.send("FORGE server is running!"));
 // ---------- CODES DE LIAISON ----------
 
 // (1) Le SITE demande un nouveau code de liaison
+// Genere un segment aleatoire de lettres+chiffres (sans caracteres ambigus)
+function randomSegment(len) {
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // pas de 0/O/1/I pour eviter la confusion
+  let s = "";
+  for (let i = 0; i < len; i++) s += chars[Math.floor(Math.random() * chars.length)];
+  return s;
+}
+
 app.post("/link/new", async (req, res) => {
   try {
-    // genere un code du type FORGE-1234
-    const code = "FORGE-" + Math.floor(1000 + Math.random() * 9000);
-    await pool.query("INSERT INTO link_codes (code) VALUES ($1)", [code]);
-    res.json({ status: "ok", code: code });
+    // code long type FORGE-A7K9-X2M4
+    const code = "FORGE-" + randomSegment(4) + "-" + randomSegment(4);
+    const expires = new Date(Date.now() + 15 * 60 * 1000); // expire dans 15 min
+    await pool.query(
+      "INSERT INTO link_codes (code, expires_at) VALUES ($1, $2)",
+      [code, expires]
+    );
+    res.json({ status: "ok", code: code, expires_in_minutes: 15 });
   } catch (err) {
     res.status(500).json({ error: "Erreur creation code", details: String(err) });
   }
@@ -62,6 +75,9 @@ app.post("/link/confirm", async (req, res) => {
     const found = await pool.query("SELECT * FROM link_codes WHERE code = $1", [code]);
     if (found.rows.length === 0) return res.status(404).json({ error: "Code introuvable" });
     if (found.rows[0].used) return res.status(400).json({ error: "Code deja utilise" });
+    if (found.rows[0].expires_at && new Date(found.rows[0].expires_at) < new Date()) {
+      return res.status(400).json({ error: "Code expire, genere un nouveau code" });
+    }
 
     // marque le code comme utilise et enregistre l'identite
     await pool.query(
