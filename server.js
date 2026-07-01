@@ -55,7 +55,7 @@ async function generateFromAI(userPrompt) {
     body: JSON.stringify({
       system_instruction: { parts: [{ text: sys }] },
       contents: [{ role: "user", parts: [{ text: userPrompt }] }],
-      generationConfig: { responseMimeType: "application/json", responseSchema: schema, maxOutputTokens: 4096 },
+      generationConfig: { responseMimeType: "application/json", responseSchema: schema, maxOutputTokens: 8192 },
     }),
   });
   const data = await response.json();
