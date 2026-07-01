@@ -6,7 +6,7 @@ const pool = new pg.Pool({
   ssl: { rejectUnauthorized: false },
 });
 
-// Cree la table des utilisateurs si elle n'existe pas encore
+// Tables : users + codes de liaison
 async function initDatabase() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS users (
@@ -17,7 +17,16 @@ async function initDatabase() {
       created_at TIMESTAMP DEFAULT NOW()
     )
   `);
-  console.log("Base de donnees prete (table users).");
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS link_codes (
+      code TEXT PRIMARY KEY,
+      used BOOLEAN DEFAULT FALSE,
+      roblox_id TEXT,
+      username TEXT,
+      created_at TIMESTAMP DEFAULT NOW()
+    )
+  `);
+  console.log("Base de donnees prete (users + link_codes).");
 }
 initDatabase().catch((e) => console.error("Erreur init DB:", e));
 
@@ -26,10 +35,73 @@ app.use(express.json());
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const MODEL = "gemini-2.5-flash";
-
 let mailbox = null;
 
 app.get("/", (req, res) => res.send("FORGE server is running!"));
+
+// ---------- CODES DE LIAISON ----------
+
+// (1) Le SITE demande un nouveau code de liaison
+app.post("/link/new", async (req, res) => {
+  try {
+    // genere un code du type FORGE-1234
+    const code = "FORGE-" + Math.floor(1000 + Math.random() * 9000);
+    await pool.query("INSERT INTO link_codes (code) VALUES ($1)", [code]);
+    res.json({ status: "ok", code: code });
+  } catch (err) {
+    res.status(500).json({ error: "Erreur creation code", details: String(err) });
+  }
+});
+
+// (2) Le PLUGIN envoie le code + l'identite Roblox lue dans Studio
+app.post("/link/confirm", async (req, res) => {
+  try {
+    const { code, roblox_id, username } = req.body;
+    if (!code || !roblox_id) return res.status(400).json({ error: "code et roblox_id requis" });
+
+    const found = await pool.query("SELECT * FROM link_codes WHERE code = $1", [code]);
+    if (found.rows.length === 0) return res.status(404).json({ error: "Code introuvable" });
+    if (found.rows[0].used) return res.status(400).json({ error: "Code deja utilise" });
+
+    // marque le code comme utilise et enregistre l'identite
+    await pool.query(
+      "UPDATE link_codes SET used = TRUE, roblox_id = $1, username = $2 WHERE code = $3",
+      [String(roblox_id), username || "Inconnu", code]
+    );
+    // cree (ou met a jour) l'utilisateur
+    await pool.query(
+      `INSERT INTO users (roblox_id, username, credits) VALUES ($1, $2, 0)
+       ON CONFLICT (roblox_id) DO UPDATE SET username = EXCLUDED.username`,
+      [String(roblox_id), username || "Inconnu"]
+    );
+    res.json({ status: "ok", message: "Compte lie", username: username });
+  } catch (err) {
+    res.status(500).json({ error: "Erreur liaison", details: String(err) });
+  }
+});
+
+// (3) Le SITE verifie si un code a ete lie (pour afficher le profil)
+app.get("/link/status/:code", async (req, res) => {
+  try {
+    const found = await pool.query("SELECT * FROM link_codes WHERE code = $1", [req.params.code]);
+    if (found.rows.length === 0) return res.status(404).json({ error: "Code introuvable" });
+    const row = found.rows[0];
+    if (row.used) {
+      res.json({
+        linked: true,
+        roblox_id: row.roblox_id,
+        username: row.username,
+        avatar: "https://thumbnails.roblox.com/v1/users/avatar-headshot?userIds=" + row.roblox_id + "&size=150x150&format=Png&isCircular=false",
+      });
+    } else {
+      res.json({ linked: false });
+    }
+  } catch (err) {
+    res.status(500).json({ error: "Erreur statut", details: String(err) });
+  }
+});
+
+// ---------- IA (inchange) ----------
 
 async function generateFromAI(userPrompt) {
   const sys =
@@ -77,7 +149,6 @@ function parseCompact(raw) {
   for (const rawLine of lines) {
     let t = rawLine.trim();
     if (t === "") continue;
-    // Nettoyer les prefixes parasites que l'IA ajoute parfois
     t = t.replace(/^Part\s*:\s*/i, "").replace(/^Script\s*:\s*/i, "").replace(/^[-*]\s*/, "");
     if (t.startsWith("CAT:")) {
       result.category = t.slice(4).trim();
@@ -92,17 +163,10 @@ function parseCompact(raw) {
       if (p.length >= 13) {
         result.actions.push({
           tool: "create_part",
-          name: p[1],
-          shape: p[2],
-          px: Number(p[3]) || 0,
-          py: Number(p[4]) || 0,
-          pz: Number(p[5]) || 0,
-          sx: Number(p[6]) || 1,
-          sy: Number(p[7]) || 1,
-          sz: Number(p[8]) || 1,
-          r: Number(p[9]) || 150,
-          g: Number(p[10]) || 150,
-          b: Number(p[11]) || 150,
+          name: p[1], shape: p[2],
+          px: Number(p[3]) || 0, py: Number(p[4]) || 0, pz: Number(p[5]) || 0,
+          sx: Number(p[6]) || 1, sy: Number(p[7]) || 1, sz: Number(p[8]) || 1,
+          r: Number(p[9]) || 150, g: Number(p[10]) || 150, b: Number(p[11]) || 150,
           material: p[12] ? p[12].trim() : "Plastic",
           anchored: true,
         });
@@ -113,10 +177,7 @@ function parseCompact(raw) {
         const code = p.slice(4).join(",").replace(/\\n/g, "\n");
         result.actions.push({
           tool: "create_script",
-          name: p[1],
-          scriptType: p[2],
-          parent: p[3],
-          source: code,
+          name: p[1], scriptType: p[2], parent: p[3], source: code,
         });
       }
     }
@@ -127,12 +188,8 @@ function parseCompact(raw) {
 app.post("/submit", async (req, res) => {
   try {
     const userPrompt = req.body.prompt;
-    if (!userPrompt) {
-      return res.status(400).json({ error: "Aucun prompt" });
-    }
-    if (!GEMINI_API_KEY) {
-      return res.status(500).json({ error: "Cle non configuree" });
-    }
+    if (!userPrompt) return res.status(400).json({ error: "Aucun prompt" });
+    if (!GEMINI_API_KEY) return res.status(500).json({ error: "Cle non configuree" });
     const { result, raw } = await generateFromAI(userPrompt);
     mailbox = result;
     res.json({ status: "ok", preview: result.summary, parts: result.actions.length, raw_ai: raw });
@@ -148,20 +205,6 @@ app.get("/poll", (req, res) => {
     res.json({ hasWork: true, job: toSend });
   } else {
     res.json({ hasWork: false });
-  }
-});
-
-// Route de test : cree un utilisateur bidon et compte les utilisateurs
-app.get("/db-test", async (req, res) => {
-  try {
-    await pool.query(
-      "INSERT INTO users (roblox_id, username, credits) VALUES ($1, $2, $3) ON CONFLICT (roblox_id) DO NOTHING",
-      ["test_" + Date.now(), "JoueurTest", 100]
-    );
-    const result = await pool.query("SELECT COUNT(*) FROM users");
-    res.json({ status: "ok", nombre_utilisateurs: result.rows[0].count });
-  } catch (err) {
-    res.status(500).json({ error: "Erreur base de donnees", details: String(err) });
   }
 });
 
