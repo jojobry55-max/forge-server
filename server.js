@@ -27,6 +27,7 @@ async function initDatabase() {
       expires_at TIMESTAMP
     )
   `);
+  await pool.query(`ALTER TABLE link_codes ADD COLUMN IF NOT EXISTS expires_at TIMESTAMP`);
   console.log("Base de donnees prete (users + link_codes).");
 }
 initDatabase().catch((e) => console.error("Erreur init DB:", e));
